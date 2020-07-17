@@ -32,6 +32,7 @@
     "publish": "vsce publish"
   },
   "dependencies": {
+    "split-cmd": "^1.0.1",
     "tslib": "^1.9.3",
     "vscode-test-adapter-api": "^1.9.0",
     "vscode-test-adapter-util": "^0.7.1"
@@ -55,6 +56,30 @@
       "type": "object",
       "title": "PicoTest Test Explorer",
       "properties": {
+        "picotestExplorer.testCommand": {
+          "description": "Test command/path (absolute or relative to the workspace folder)",
+          "type": "string",
+          "default": "",
+          "scope": "resource"
+        },
+        "picotestExplorer.testCwd": {
+          "description": "Directory to run the test within (absolute or relative to the workspace folder)",
+          "type": "string",
+          "default": "",
+          "scope": "resource"
+        },
+        "picotestExplorer.loadArgs": {
+          "description": "Arguments passed to test command at load time",
+          "type": "string",
+          "default": "-J",
+          "scope": "resource"
+        },
+        "picotestExplorer.runArgs": {
+          "description": "Arguments passed to test command at run time",
+          "type": "string",
+          "default": "-j",
+          "scope": "resource"
+        },
         "picotestExplorer.logpanel": {
           "description": "write diagnotic logs to an output panel",
           "type": "boolean",
