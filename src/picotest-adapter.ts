@@ -10,10 +10,19 @@ import {
   TestEvent,
   TestSuiteInfo,
   TestInfo,
+  RetireEvent,
 } from 'vscode-test-adapter-api';
 import { Log } from 'vscode-test-adapter-util';
 import { PicotestTestInfo } from './interfaces/picotest-test-info';
-import { loadPicotestTests } from './picotest-runner';
+import { PicotestTestProcess } from './interfaces/picotest-test-process';
+import {
+  loadPicotestTests,
+  schedulePicotestTestProcess,
+  executePicotestTestProcess,
+  cancelPicotestTestProcess,
+  PicotestEvent,
+  PicotestFailureEvent,
+} from './picotest-runner';
 
 /** Special ID value for the root suite */
 const ROOT_SUITE_ID = '*';
@@ -32,7 +41,7 @@ export class PicotestAdapter implements TestAdapter {
   private state: 'idle' | 'loading' | 'running' | 'cancelled' = 'idle';
 
   /** Currently running test */
-  //TODO private currentTestProcess?: PicotestTestProcess;
+  private currentTestProcess?: PicotestTestProcess;
 
   //
   // TestAdapter implementations
@@ -44,6 +53,7 @@ export class PicotestAdapter implements TestAdapter {
   private readonly testStatesEmitter = new vscode.EventEmitter<
     TestRunStartedEvent | TestRunFinishedEvent | TestSuiteEvent | TestEvent
   >();
+  private readonly retireEmitter = new vscode.EventEmitter<RetireEvent>();
   private readonly autorunEmitter = new vscode.EventEmitter<void>();
 
   get tests(): vscode.Event<TestLoadStartedEvent | TestLoadFinishedEvent> {
@@ -102,12 +112,34 @@ export class PicotestAdapter implements TestAdapter {
       tests,
     });
 
-    try {
-      for (const id of tests) {
-        await this.runTest(id);
+    const runAll = tests.length == 1 && tests[0] === ROOT_SUITE_ID;
+    if (runAll) {
+      try {
+        this.testStatesEmitter.fire(<TestSuiteEvent>{
+          type: 'suite',
+          suite: ROOT_SUITE_ID,
+          state: 'running',
+        });
+        await this.runTests([]);
+        this.testStatesEmitter.fire(<TestSuiteEvent>{
+          type: 'suite',
+          suite: ROOT_SUITE_ID,
+          state: 'completed',
+        });
+      } catch (e) {
+        this.testStatesEmitter.fire(<TestSuiteEvent>{
+          type: 'suite',
+          suite: ROOT_SUITE_ID,
+          state: 'errored',
+          message: e.toString(),
+        });
       }
-    } catch (e) {
-      // Fail silently
+    } else {
+      try {
+        await this.runTests(tests);
+      } catch (e) {
+        // Fail silently
+      }
     }
 
     this.testStatesEmitter.fire(<TestRunFinishedEvent>{ type: 'finished' });
@@ -131,7 +163,8 @@ export class PicotestAdapter implements TestAdapter {
   cancel(): void {
     if (this.state !== 'running') return; // ignore
 
-    // TODO if (this.currentTestProcess) cancelPicotestTest(this.currentTestProcess);
+    if (this.currentTestProcess)
+      cancelPicotestTestProcess(this.currentTestProcess);
 
     // State will eventually transition to idle once the run loop completes
     this.state = 'cancelled';
@@ -173,10 +206,77 @@ export class PicotestAdapter implements TestAdapter {
   /**
    * Run tests
    *
-   * @param id Test or suite ID
+   * @param tests Test IDs (empty for all)
    */
-  private async runTest(id: string) {
-    // TODO
+  private async runTests(tests: string[]) {
+    if (this.state === 'cancelled') {
+      // Test run cancelled, retire test
+      this.retireEmitter.fire(<RetireEvent>{ tests });
+      return;
+    }
+
+    try {
+      // Get & substitute config settings
+      const [testCommand, testCwd, runArgs] = await this.getConfigStrings([
+        'testCommand',
+        'testCwd',
+        'runArgs',
+      ]);
+
+      // Run tests
+      const cwd = path.resolve(this.workspaceFolder.uri.fsPath, testCwd);
+
+      this.currentTestProcess = schedulePicotestTestProcess(
+        testCommand,
+        cwd,
+        tests,
+        runArgs
+      );
+      let failures: PicotestFailureEvent[] = [];
+      await executePicotestTestProcess(
+        this.currentTestProcess,
+        (event: PicotestEvent) => {
+          switch (event.hook) {
+            case 'FAILURE':
+              failures.push(event);
+              break;
+            case 'SUITE_ENTER':
+              this.testStatesEmitter.fire(<TestSuiteEvent>{
+                type: 'suite',
+                suite: event.suiteName,
+                state: 'running',
+              });
+              break;
+            case 'SUITE_LEAVE':
+              this.testStatesEmitter.fire(<TestSuiteEvent>{
+                type: 'suite',
+                suite: event.suiteName,
+                state: 'completed',
+              });
+              break;
+            case 'CASE_ENTER':
+              this.testStatesEmitter.fire(<TestEvent>{
+                type: 'test',
+                test: event.testName,
+                state: 'running',
+              });
+              failures = [];
+              break;
+            case 'CASE_LEAVE':
+              this.testStatesEmitter.fire(<TestEvent>{
+                type: 'test',
+                test: event.testName,
+                state: event.fail ? 'failed' : 'passed',
+                decorations: failures.map(toDecoration),
+                message: failures.map(toMessage).join('\n'),
+              });
+              break;
+          }
+        }
+      );
+    } finally {
+      this.currentTestProcess = undefined;
+    }
   }
 
   /**
@@ -259,7 +359,7 @@ function convertPicotestInfo(test: PicotestTestInfo): TestSuiteInfo | TestInfo {
       id: test.name,
       label: test.name,
       file: test.file,
-      line: test.line,
+      line: test.line - 1,
       children: test.subtests.map(convertPicotestInfo),
     };
   } else {
@@ -268,7 +368,40 @@ function convertPicotestInfo(test: PicotestTestInfo): TestSuiteInfo | TestInfo {
       id: test.name,
       label: test.name,
       file: test.file,
-      line: test.line,
+      line: test.line - 1,
     };
   }
+}
+
+/**
+ * Format PicoTest error message from failure event
+ *
+ * @param event PicoTest failure event
+ */
+function getErrorMessage(event: PicotestFailureEvent) {
+  return event.msg
+    ? `[${event.type}] ${event.test} | ${event.msg}`
+    : `[${event.type}] ${event.test}`;
+}
+
+/**
+ * Convert Picotest failure event to Test Explorer decoration
+ *
+ * @param event PicoTest failure event
+ */
+function toDecoration(event: PicotestFailureEvent) {
+  return {
+    line: event.line - 1,
+    file: event.file,
+    message: getErrorMessage(event),
+  };
+}
+
+/**
+ * Convert Picotest failure event to error message
+ *
+ * @param event PicoTest failure event
+ */
+function toMessage(event: PicotestFailureEvent) {
+  return `${event.file}:${event.line} - ${getErrorMessage(event)}`;
 }

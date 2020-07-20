@@ -32,6 +32,7 @@
     "publish": "vsce publish"
   },
   "dependencies": {
+    "concatjson": "^2.0.1",
     "split-cmd": "^1.0.1",
     "tslib": "^1.9.3",
     "vscode-test-adapter-api": "^1.9.0",
