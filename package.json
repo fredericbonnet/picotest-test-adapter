@@ -57,6 +57,12 @@
       "type": "object",
       "title": "PicoTest Test Explorer",
       "properties": {
+        "picotestExplorer.debugConfig": {
+          "description": "Custom debug configuration to use (empty for default)",
+          "type": "string",
+          "default": "",
+          "scope": "resource"
+        },
         "picotestExplorer.testCommand": {
           "description": "Test command/path (absolute or relative to the workspace folder)",
           "type": "string",

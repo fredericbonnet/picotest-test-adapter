@@ -43,6 +43,9 @@ export class PicotestAdapter implements TestAdapter {
   /** Currently running test */
   private currentTestProcess?: PicotestTestProcess;
 
+  /** Currently debugged test config */
+  private debuggedTestConfig?: Partial<vscode.DebugConfiguration>;
+
   //
   // TestAdapter implementations
   //
@@ -70,9 +73,27 @@ export class PicotestAdapter implements TestAdapter {
 
   constructor(
     public readonly workspaceFolder: vscode.WorkspaceFolder,
-    private readonly log: Log
+    private readonly log: Log,
+    context: vscode.ExtensionContext
   ) {
     this.log.info('Initializing PicoTest adapter');
+
+    // Register a DebugConfigurationProvider to combine global and
+    // test-specific debug configurations (see debugTest)
+    context.subscriptions.push(
+      vscode.debug.registerDebugConfigurationProvider('cppdbg', {
+        resolveDebugConfiguration: (
+          folder: vscode.WorkspaceFolder | undefined,
+          config: vscode.DebugConfiguration,
+          token?: vscode.CancellationToken
+        ): vscode.ProviderResult<vscode.DebugConfiguration> => {
+          return {
+            ...config,
+            ...this.debuggedTestConfig,
+          };
+        },
+      })
+    );
 
     this.disposables.push(this.testsEmitter);
     this.disposables.push(this.testStatesEmitter);
@@ -146,19 +167,17 @@ export class PicotestAdapter implements TestAdapter {
     this.state = 'idle';
   }
 
-  /*TODO
   async debug(tests: string[]): Promise<void> {
     this.log.info(`Debugging PicoTest tests ${JSON.stringify(tests)}`);
 
     try {
-      for (const id of tests) {
-        await this.debugTest(id);
+      for (const test of tests) {
+        await this.debugTest(test);
       }
     } catch (e) {
       // Fail silently
     }
   }
-  */
 
   cancel(): void {
     if (this.state !== 'running') return; // ignore
@@ -222,10 +241,9 @@ export class PicotestAdapter implements TestAdapter {
         'testCwd',
         'runArgs',
       ]);
-
-      // Run tests
       const cwd = path.resolve(this.workspaceFolder.uri.fsPath, testCwd);
 
+      // Run tests
       this.currentTestProcess = schedulePicotestTestProcess(
         testCommand,
         cwd,
@@ -280,14 +298,98 @@ export class PicotestAdapter implements TestAdapter {
   }
 
   /**
-   * Debug a single test
+   * Debug a single test or test suite
    *
-   * @param id Test ID
+   * @param test Test ID
    */
-  /*TODO
-  private async debugTest(id: string) {
+  private async debugTest(test: string) {
+    this.log.info(`Debugging PicoTest test ${test}`);
+    try {
+      // Get & substitute config settings
+      const [
+        testCommand,
+        testCwd,
+        runArgs,
+        debugConfig,
+      ] = await this.getConfigStrings([
+        'testCommand',
+        'testCwd',
+        'runArgs',
+        'debugConfig',
+      ]);
+
+      // Get test config
+      const defaultConfig = this.getDefaultDebugConfiguration();
+
+      // Remember test-specific config for the DebugConfigurationProvider registered
+      // in the constructor (method resolveDebugConfiguration)
+      const cwd = path.resolve(this.workspaceFolder.uri.fsPath, testCwd);
+      this.debuggedTestConfig = this.getPicotestDebugConfiguration(
+        testCommand,
+        cwd,
+        test,
+        runArgs
+      );
+
+      // Start the debugging session. The actual debug config will combine the
+      // global and test-specific values
+      await vscode.debug.startDebugging(
+        this.workspaceFolder,
+        debugConfig || defaultConfig
+      );
+    } catch (e) {
+      this.log.error(`Error debugging PicoTest test ${test}`, e.toString());
+    } finally {
+      this.debuggedTestConfig = undefined;
+    }
   }
-  */
+
+  /**
+   * Get default debug config when none is specified in the settings
+   */
+  private getDefaultDebugConfiguration(): vscode.DebugConfiguration {
+    return {
+      name: 'CTest',
+      type: 'cppdbg',
+      request: 'launch',
+      windows: {
+        type: 'cppvsdbg',
+      },
+      linux: {
+        type: 'cppdbg',
+        MIMode: 'gdb',
+      },
+      osx: {
+        type: 'cppdbg',
+        MIMode: 'lldb',
+      },
+    };
+  }
+  /**
+   * Get debug configuration for a single PicoTest test
+   *
+   * @param test Test to debug
+   */
+  private getPicotestDebugConfiguration(
+    command: string,
+    cwd: string,
+    test: string,
+    runArgs: string
+  ): Partial<vscode.DebugConfiguration> {
+    return test === ROOT_SUITE_ID
+      ? {
+          name: `PicoTest`,
+          program: command,
+          args: runArgs,
+          cwd,
+        }
+      : {
+          name: `PicoTest ${test}`,
+          program: command,
+          args: [...runArgs, test],
+          cwd,
+        };
+  }
 
   /**
    * Get workspace configuration object

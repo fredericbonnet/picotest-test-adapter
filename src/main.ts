@@ -38,7 +38,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
       new TestAdapterRegistrar(
         testHub,
-        (workspaceFolder) => new PicotestAdapter(workspaceFolder, log),
+        (workspaceFolder) => new PicotestAdapter(workspaceFolder, log, context),
         log
       )
     );
