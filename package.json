@@ -57,6 +57,12 @@
       "type": "object",
       "title": "PicoTest Test Explorer",
       "properties": {
+        "picotestExplorer.autoReload": {
+          "description": "Auto-reload test list when test command file changes",
+          "type": "boolean",
+          "default": true,
+          "scope": "resource"
+        },
         "picotestExplorer.debugConfig": {
           "description": "Custom debug configuration to use (empty for default)",
           "type": "string",

@@ -24,6 +24,9 @@ import {
   PicotestFailureEvent,
 } from './picotest-runner';
 
+/** VS Code configuration scope */
+const CONFIGURATION_SCOPE = 'picotestExplorer';
+
 /** Special ID value for the root suite */
 const ROOT_SUITE_ID = '*';
 
@@ -45,6 +48,9 @@ export class PicotestAdapter implements TestAdapter {
 
   /** Currently debugged test config */
   private debuggedTestConfig?: Partial<vscode.DebugConfiguration>;
+
+  /** Test command file watcher for auto-reload */
+  private testCommandWatcher?: vscode.FileSystemWatcher;
 
   //
   // TestAdapter implementations
@@ -78,22 +84,8 @@ export class PicotestAdapter implements TestAdapter {
   ) {
     this.log.info('Initializing PicoTest adapter');
 
-    // Register a DebugConfigurationProvider to combine global and
-    // test-specific debug configurations (see debugTest)
-    context.subscriptions.push(
-      vscode.debug.registerDebugConfigurationProvider('cppdbg', {
-        resolveDebugConfiguration: (
-          folder: vscode.WorkspaceFolder | undefined,
-          config: vscode.DebugConfiguration,
-          token?: vscode.CancellationToken
-        ): vscode.ProviderResult<vscode.DebugConfiguration> => {
-          return {
-            ...config,
-            ...this.debuggedTestConfig,
-          };
-        },
-      })
-    );
+    this.initDebug(context);
+    this.initAutoReload();
 
     this.disposables.push(this.testsEmitter);
     this.disposables.push(this.testStatesEmitter);
@@ -195,6 +187,7 @@ export class PicotestAdapter implements TestAdapter {
       disposable.dispose();
     }
     this.disposables = [];
+    this.unregisterWatcher();
   }
 
   /**
@@ -321,8 +314,8 @@ export class PicotestAdapter implements TestAdapter {
       // Get test config
       const defaultConfig = this.getDefaultDebugConfiguration();
 
-      // Remember test-specific config for the DebugConfigurationProvider registered
-      // in the constructor (method resolveDebugConfiguration)
+      // Remember test-specific config for the DebugConfigurationProvider
+      // registered in initDebug()
       const cwd = path.resolve(this.workspaceFolder.uri.fsPath, testCwd);
       this.debuggedTestConfig = this.getPicotestDebugConfiguration(
         testCommand,
@@ -342,6 +335,30 @@ export class PicotestAdapter implements TestAdapter {
     } finally {
       this.debuggedTestConfig = undefined;
     }
+  }
+
+  /**
+   * Debug-related initialization
+   *
+   * @param context Extension context
+   */
+  private initDebug(context: vscode.ExtensionContext) {
+    // Register a DebugConfigurationProvider to combine global and
+    // test-specific debug configurations (see debugTest)
+    context.subscriptions.push(
+      vscode.debug.registerDebugConfigurationProvider('cppdbg', {
+        resolveDebugConfiguration: (
+          folder: vscode.WorkspaceFolder | undefined,
+          config: vscode.DebugConfiguration,
+          token?: vscode.CancellationToken
+        ): vscode.ProviderResult<vscode.DebugConfiguration> => {
+          return {
+            ...config,
+            ...this.debuggedTestConfig,
+          };
+        },
+      })
+    );
   }
 
   /**
@@ -396,7 +413,7 @@ export class PicotestAdapter implements TestAdapter {
    */
   private getWorkspaceConfiguration() {
     return vscode.workspace.getConfiguration(
-      'picotestExplorer',
+      CONFIGURATION_SCOPE,
       this.workspaceFolder.uri
     );
   }
@@ -408,9 +425,9 @@ export class PicotestAdapter implements TestAdapter {
    *
    * @return Config values
    */
-  private async getConfigStrings(names: string[]) {
+  private getConfigStrings(names: string[]) {
     const config = this.getWorkspaceConfiguration();
-    const varMap = await this.getVariableSubstitutionMap();
+    const varMap = this.getVariableSubstitutionMap();
     return names.map((name) => this.configGetStr(config, varMap, name));
   }
 
@@ -439,13 +456,76 @@ export class PicotestAdapter implements TestAdapter {
   /**
    * Get variable to value substitution map for config strings
    */
-  private async getVariableSubstitutionMap() {
+  private getVariableSubstitutionMap() {
     // Standard variables
     const substitutionMap = new Map<string, string>([
       ['${workspaceFolder}', this.workspaceFolder.uri.fsPath],
     ]);
 
     return substitutionMap;
+  }
+
+  /**
+   * Auto-reload-specific initialization
+   */
+  private async initAutoReload() {
+    this.registerWatcher();
+
+    // Register test command watcher again whenever settings change
+    vscode.workspace.onDidChangeConfiguration(
+      (e) => {
+        if (
+          e.affectsConfiguration(CONFIGURATION_SCOPE, this.workspaceFolder.uri)
+        ) {
+          this.unregisterWatcher();
+          this.registerWatcher();
+        }
+      },
+      this,
+      this.disposables
+    );
+  }
+
+  /**
+   * Check whether auto-reload option is activated
+   */
+  private autoReload() {
+    const config = this.getWorkspaceConfiguration();
+    return !!config.get<boolean>('autoReload');
+  }
+
+  /**
+   * Register test command file watcher
+   */
+  private registerWatcher() {
+    if (!this.autoReload()) return;
+
+    // Get & substitute config settings
+    const [testCommand, testCwd] = this.getConfigStrings([
+      'testCommand',
+      'testCwd',
+    ]);
+    const command = path.resolve(
+      this.workspaceFolder.uri.fsPath,
+      testCwd,
+      testCommand
+    );
+    this.testCommandWatcher = vscode.workspace.createFileSystemWatcher(
+      command,
+      false,
+      false,
+      true
+    );
+    this.testCommandWatcher.onDidCreate(() => this.load());
+    this.testCommandWatcher.onDidChange(() => this.load());
+  }
+
+  /**
+   * Unregister test command file watcher
+   */
+  private unregisterWatcher() {
+    if (this.testCommandWatcher) this.testCommandWatcher.dispose();
+    this.testCommandWatcher = undefined;
   }
 }
 
